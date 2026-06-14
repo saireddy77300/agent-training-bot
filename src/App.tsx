@@ -128,6 +128,10 @@ export default function App() {
     return saved === 'dark';
   });
 
+  const [userApiKey, setUserApiKey] = useState(() => {
+    return localStorage.getItem('user_gemini_api_key') || '';
+  });
+
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef<any>(null);
 
@@ -164,6 +168,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('theme', isDark ? 'dark' : 'light');
   }, [isDark]);
+
+  useEffect(() => {
+    localStorage.setItem('user_gemini_api_key', userApiKey);
+  }, [userApiKey]);
 
   useEffect(() => {
     return () => {
@@ -287,24 +295,87 @@ export default function App() {
     setIsLoading(true);
 
     try {
+      let data;
       const chatRequest: ChatRequest = {
         messages: newMessages,
         knowledgeBase
       };
 
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(chatRequest)
-      });
+      let serverSuccess = false;
+      try {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(chatRequest)
+        });
 
-      if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.error || 'Failed to fetch response');
+        if (res.ok) {
+          data = await res.json();
+          serverSuccess = true;
+        } else if (res.status === 404) {
+          console.warn("Backend server returned 404. Checking client-side API key...");
+        } else {
+          const errorData = await res.json();
+          throw new Error(errorData.error || 'Failed to fetch response');
+        }
+      } catch (serverErr: any) {
+        console.error("Server API check failed:", serverErr);
+        if (!userApiKey) {
+          throw new Error("Backend server is offline or unavailable. Please click the Settings gear icon in the chat header to add your Gemini API Key and chat directly from the browser.");
+        }
       }
 
-      const data = await res.json();
-      
+      if (!serverSuccess) {
+        if (!userApiKey) {
+          throw new Error("Backend server is offline. Please click the Settings gear icon in the chat header to configure your Gemini API Key for client-side chat.");
+        }
+
+        const systemInstruction = `You are the Agent Training AI Bot for Lohithadharma Projects PVT, LTD.
+You help sales agents by answering their questions regarding company training material, policies, and operations.
+You must answer the agent's questions based ONLY on the following custom knowledge base. 
+You must explicitly provide responses in Telugu if the user asks in Telugu. Default to English for all other queries.
+If the answer is not explicitly stated or inferable from the knowledge base, politely inform the agent that you don't have that information.
+
+<knowledge_base>
+${knowledgeBase || "No knowledge base provided."}
+</knowledge_base>`;
+
+        // Map messages to Gemini REST API format
+        const formattedContents = newMessages.map((m: any) => ({
+          role: m.role === 'model' ? 'model' : 'user',
+          parts: [{ text: m.text }]
+        }));
+
+        const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${userApiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: formattedContents,
+            systemInstruction: {
+              parts: [{ text: systemInstruction }]
+            },
+            generationConfig: {
+              temperature: 0.1
+            }
+          })
+        });
+
+        if (!geminiRes.ok) {
+          const errBody = await geminiRes.json().catch(() => ({}));
+          throw new Error(errBody?.error?.message || `Gemini API call failed with status ${geminiRes.status}`);
+        }
+
+        const geminiData = await geminiRes.json();
+        const candidateText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        
+        data = {
+          text: candidateText,
+          usage: {
+            totalTokenCount: geminiData.usageMetadata?.totalTokenCount || 0
+          }
+        };
+      }
+
       const newMessageId = (Date.now() + 1).toString();
       setTypingMessageId(newMessageId);
 
@@ -762,16 +833,36 @@ export default function App() {
                 </button>
               </div>
               <div className="p-6 overflow-y-auto flex-1">
-                <p className={cn("text-sm mb-4 transition-colors duration-200", isDark ? "text-slate-400" : "text-slate-500")}>
-                  Edit the text below to update the knowledge base. The AI will strictly use this information to answer user queries.
-                </p>
-                <textarea
-                  value={knowledgeBase}
-                  onChange={(e) => setKnowledgeBase(e.target.value)}
-                  className={cn("w-full h-80 p-4 text-sm font-mono border rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none resize-none styled-scrollbar transition-colors duration-200",
-                    isDark ? "bg-[#1e2433] text-slate-100 border-[#2a303f]" : "bg-slate-50 text-slate-700 border-slate-200"
-                  )}
-                />
+                <div className="mb-6">
+                  <label className={cn("text-sm font-semibold block mb-2", isDark ? "text-slate-300" : "text-slate-700")}>
+                    Gemini API Key (Client-side Fallback)
+                  </label>
+                  <input
+                    type="password"
+                    value={userApiKey}
+                    onChange={(e) => setUserApiKey(e.target.value)}
+                    placeholder="Enter your Gemini API Key (starts with AIzaSy...)"
+                    className={cn("w-full p-3 text-sm border rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none transition-colors duration-200",
+                      isDark ? "bg-[#1e2433] text-slate-105 border-[#2a303f] placeholder:text-slate-600" : "bg-slate-50 text-slate-700 border-slate-200 placeholder:text-slate-400"
+                    )}
+                  />
+                  <p className={cn("text-[11px] mt-1.5 leading-normal", isDark ? "text-slate-500" : "text-slate-400")}>
+                    Required when running statically on GitHub Pages. Your key is stored locally in your browser's local storage and is never sent to any server.
+                  </p>
+                </div>
+                
+                <div>
+                  <label className={cn("text-sm font-semibold block mb-2", isDark ? "text-slate-300" : "text-slate-700")}>
+                    Custom Knowledge Base
+                  </label>
+                  <textarea
+                    value={knowledgeBase}
+                    onChange={(e) => setKnowledgeBase(e.target.value)}
+                    className={cn("w-full h-60 p-4 text-sm font-mono border rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none resize-none styled-scrollbar transition-colors duration-200",
+                      isDark ? "bg-[#1e2433] text-slate-100 border-[#2a303f]" : "bg-slate-50 text-slate-700 border-slate-200"
+                    )}
+                  />
+                </div>
               </div>
               <div className={cn("p-6 border-t flex justify-end transition-colors duration-200", isDark ? "border-[#1e2433] bg-[#1a1e2b]" : "border-slate-200 bg-slate-50")}>
                 <button
